@@ -8,7 +8,7 @@
 <body style="font-family: Segoe UI, Arial, sans-serif; text-align: center; margin-top: 80px;">
     <form id="form1" runat="server">
         <div>
-            <h1>Hola Mundo Synapsis</h1>
+            <h1>Hola Mundo Team Synapsis</h1>
             <p>ASP.NET Framework 4.8.1 corriendo en IIS</p>
             <p>Servidor: <asp:Literal ID="litServerName" runat="server" /></p>
             <p>Hora del servidor: <asp:Literal ID="litServerTime" runat="server" /></p>
@@ -17,3 +17,5 @@
     </form>
 </body>
 </html>
+
+<%--#'Este es un proyecto visual.net fmk 4.8.1 lo vamos a deployar en aws, con ayuda de github y los runners...--%>
