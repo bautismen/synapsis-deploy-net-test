@@ -8,8 +8,8 @@
 <body style="font-family: Segoe UI, Arial, sans-serif; text-align: center; margin-top: 80px;">
     <form id="form1" runat="server">
         <div>
-            <h1>Hola Mundo :)</h1>
-            <p>MOP:ASP.NET Framework 4.8.1 corriendo en IIS</p>
+            <h1>Hola Mundo 👋</h1>
+            <p>ASP.NET Framework 4.8.1 corriendo en IIS</p>
             <p>Servidor: <asp:Literal ID="litServerName" runat="server" /></p>
             <p>Hora del servidor: <asp:Literal ID="litServerTime" runat="server" /></p>
             <p>Versión de despliegue: <asp:Literal ID="litBuildTag" runat="server" /></p>

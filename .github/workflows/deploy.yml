@@ -1,4 +1,4 @@
-name: Build y Deploy a IIS (via ngrok)
+name: Build y Deploy a IIS (self-hosted runner)
 
 on:
   workflow_dispatch:
@@ -7,12 +7,16 @@ on:
 
 env:
   SOLUTION_FILE: HelloWorldApp.sln
-  IIS_APP_PATH: "Default Web Site"   # TODO: confirmar nombre exacto del sitio/app en IIS
+  IIS_SITE_NAME: "HelloWorldApp"          # nombre del sitio/app pool creado con Prepare-IISSite.ps1
+  IIS_PHYSICAL_PATH: "C:\\inetpub\\HelloWorldApp"
 
 jobs:
-  build-and-deploy:
+  # -------------------------------------------------------------------
+  # Job 1: compila en un runner normal de GitHub (windows-latest ya
+  # trae MSBuild + workload de ASP.NET). No toca tu servidor.
+  # -------------------------------------------------------------------
+  build:
     runs-on: windows-latest
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -23,78 +27,63 @@ jobs:
       - name: Restore NuGet packages
         run: nuget restore ${{ env.SOLUTION_FILE }}
 
-      # -----------------------------------------------------------------
-      # 1) Compilar y generar el paquete de Web Deploy (msdeploy.zip)
-      # -----------------------------------------------------------------
-      - name: Build y generar paquete MSDeploy
+      - name: Build y publicar a carpeta (sin msdeploy)
         run: >
           msbuild ${{ env.SOLUTION_FILE }}
           /p:Configuration=Release
           /p:Platform="Any CPU"
           /p:DeployOnBuild=true
-          /p:WebPublishMethod=Package
-          /p:PackageAsSingleFile=true
-          /p:SkipInvalidConfigurations=true
-          /p:PackageLocation="$(Get-Location)\publish\HelloWorldApp.zip"
+          /p:WebPublishMethod=FileSystem
+          /p:publishUrl="$(Get-Location)\publish"
           /p:BuildTag=${{ github.sha }}
 
-      # -----------------------------------------------------------------
-      # 2) Resolver la URL pública actual del túnel ngrok que expone
-      #    el puerto 8172 (WMSvc) del Windows Server Core.
-      #    No abrimos ningún puerto en el Security Group de AWS: el agente
-      #    ngrok corre en el servidor y sale hacia afuera (outbound).
-      # -----------------------------------------------------------------
-      - name: Resolver endpoint ngrok actual
-        id: ngrok
+      - name: Subir artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: site-package
+          path: publish/
+          retention-days: 5
+
+  # -------------------------------------------------------------------
+  # Job 2: corre DENTRO de tu EC2 (self-hosted runner instalado ahi).
+  # Descarga el artifact ya compilado y lo copia al sitio de IIS.
+  # No hay red de por medio para el deploy en si: todo es local a
+  # la maquina, cero puertos, cero ngrok, cero WMSvc.
+  # -------------------------------------------------------------------
+  deploy:
+    needs: build
+    runs-on: self-hosted
+    steps:
+      - name: Descargar artifact compilado
+        uses: actions/download-artifact@v4
+        with:
+          name: site-package
+          path: site-package
+
+      - name: Deploy a IIS (robocopy + recycle app pool)
         shell: pwsh
-        env:
-          NGROK_API_KEY: ${{ secrets.NGROK_API_KEY }}
         run: |
-          $headers = @{
-            "Authorization" = "Bearer $env:NGROK_API_KEY"
-            "Ngrok-Version"  = "2"
+          Import-Module WebAdministration
+
+          $siteName = "${{ env.IIS_SITE_NAME }}"
+          $dest     = "${{ env.IIS_PHYSICAL_PATH }}"
+          $source   = "site-package"
+
+          Write-Host "Deteniendo App Pool '$siteName'..."
+          Stop-WebAppPool -Name $siteName -ErrorAction SilentlyContinue
+          Start-Sleep -Seconds 2
+
+          Write-Host "Copiando archivos con robocopy (/MIR)..."
+          robocopy "$source" "$dest" /MIR /NFL /NDL /NP
+          # robocopy usa codigos de salida 0-7 como "exito" (no son errores reales)
+          if ($LASTEXITCODE -ge 8) {
+            throw "robocopy fallo con codigo $LASTEXITCODE"
           }
-          $endpoints = Invoke-RestMethod -Uri "https://api.ngrok.com/endpoints" -Headers $headers -Method Get
 
-          # TODO: ajustar el filtro si tienes más de un túnel activo en la cuenta.
-          $tunnel = $endpoints.endpoints | Where-Object { $_.proto -eq "tcp" } | Select-Object -First 1
+          Write-Host "Arrancando App Pool '$siteName'..."
+          Start-WebAppPool -Name $siteName
 
-          if (-not $tunnel) {
-            throw "No se encontró un túnel TCP activo en ngrok. ¿Está corriendo el agente en el servidor?"
-          }
-
-          # $tunnel.public_url típicamente es algo como tcp://0.tcp.ngrok.io:12345
-          $publicUrl = $tunnel.public_url -replace "tcp://", ""
-          $hostName, $port = $publicUrl -split ":"
-
-          Write-Host "Túnel resuelto: $hostName : $port"
-          echo "host=$hostName" >> $env:GITHUB_OUTPUT
-          echo "port=$port" >> $env:GITHUB_OUTPUT
-
-      # -----------------------------------------------------------------
-      # 3) Deploy con Web Deploy (msdeploy.exe) contra el WMSvc del
-      #    servidor, accedido a través del túnel ngrok.
-      # -----------------------------------------------------------------
-      - name: Deploy via MSDeploy
-        shell: pwsh
-        env:
-          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
-          DEPLOY_PASSWORD: ${{ secrets.DEPLOY_PASSWORD }}
-        run: |
-          $msdeploy = "C:\Program Files\IIS\Microsoft Web Deploy V3\msdeploy.exe"
-          $destHost = "${{ steps.ngrok.outputs.host }}"
-          $destPort = "${{ steps.ngrok.outputs.port }}"
-
-          # msdeploy permite especificar host:puerto en la propia URL del servicio
-          $destUrl = "https://${destHost}:${destPort}/msdeploy.axd?site=${{ env.IIS_APP_PATH }}"
-
-          & "$msdeploy" `
-            -verb:sync `
-            -source:package="publish\HelloWorldApp.zip" `
-            -dest:auto,computerName="$destUrl",userName="$env:DEPLOY_USER",password="$env:DEPLOY_PASSWORD",authtype="Basic",includeAcls="False",allowUntrusted="True" `
-            -enableRule:DoNotDeleteRule `
-            -verbose
-
-          if ($LASTEXITCODE -ne 0) {
-            throw "msdeploy terminó con código $LASTEXITCODE"
-          }
+          Write-Host "Verificando respuesta local..."
+          Start-Sleep -Seconds 2
+          $response = Invoke-WebRequest -Uri "http://localhost:8080" -UseBasicParsing
+          Write-Host "Status code: $($response.StatusCode)"

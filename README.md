@@ -1,47 +1,47 @@
-# Dummy: ASP.NET 4.8.1 → IIS (Windows Server Core en AWS) vía GitHub Actions + ngrok
+# Dummy: ASP.NET 4.8.1 → IIS (Windows Server Core en AWS) vía GitHub Actions self-hosted runner
+
+## Arquitectura (sin ngrok, sin VPN, sin puertos abiertos para el deploy)
+
+- **Job `build`** corre en un runner normal de GitHub (`windows-latest`, ya trae MSBuild). Compila el proyecto y publica los archivos como *artifact*.
+- **Job `deploy`** corre en un runner **self-hosted instalado dentro de tu propia EC2**. El runner se conecta hacia afuera (outbound) a GitHub, así que nunca necesitas abrir un puerto de entrada para el deploy: descarga el artifact ya compilado y hace un `robocopy` local al folder del sitio en IIS, luego reinicia el App Pool.
+
+No se usa Web Deploy, WMSvc, ngrok, ni credenciales remotas — todo el deploy sucede localmente en la máquina donde ya vive el runner.
 
 ## Qué incluye este scaffold
-- `HelloWorldApp/` — Web Application Project (Web Forms) clásico, `TargetFrameworkVersion=v4.8.1`, listo para compilar con MSBuild (no requiere SDK-style ni .NET moderno).
-- `.github/workflows/deploy.yml` — pipeline que compila, empaqueta con Web Deploy (msdeploy) y despliega contra tu IIS **sin abrir puertos entrantes en AWS**, usando un túnel ngrok que corre en el propio servidor.
 
-## Por qué esta arquitectura (sin abrir puertos)
-El agente `ngrok` se instala **dentro** del Windows Server Core y abre una conexión saliente hacia ngrok.com. Eso expone el puerto 8172 (WMSvc / Web Deploy) como un endpoint público temporal, sin tocar el Security Group de la instancia. El workflow de GitHub Actions consulta la API de ngrok para saber cuál es la URL/puerto vigente en ese momento (cambia si el túnel se reinicia, salvo que reserves una dirección TCP fija).
+- `HelloWorldApp/` — Web Application Project (Web Forms), `TargetFrameworkVersion=v4.8.1`.
+- `.github/workflows/deploy.yml` — build (hosted) + deploy (self-hosted).
+- `server-setup/Prepare-IISSite.ps1` — crea el sitio dedicado `HelloWorldApp` en el puerto `8080` dentro de IIS, con los permisos correctos para que el runner (que corre como `NT AUTHORITY\NETWORK SERVICE`) pueda escribir ahí.
 
-## Configuración necesaria EN EL SERVIDOR (una sola vez)
+## Ya hecho de tu lado ✅
 
-1. **Habilitar Web Management Service (WMSvc)** — sí se puede en Server Core, es solo un feature + servicio, sin GUI:
+- IIS instalado y `W3SVC` corriendo.
+- Runner self-hosted instalado como servicio de Windows en `C:\actions-runner`, en estado `Running`.
+
+## Lo que falta
+
+1. **Correr `Prepare-IISSite.ps1` en el servidor** (por RDP, como Administrador):
    ```powershell
-   Install-WindowsFeature Web-Mgmt-Service
-   Set-ItemProperty -Path HKLM:\SOFTWARE\Microsoft\WebManagement\Server -Name EnableRemoteManagement -Value 1
-   Start-Service WMSVC
-   Set-Service WMSVC -StartupType Automatic
+   .\Prepare-IISSite.ps1 -SiteName "HelloWorldApp" -Port 8080 -PhysicalPath "C:\inetpub\HelloWorldApp"
    ```
-2. **Instalar Web Deploy (Web Deploy 3.6)** en el servidor (necesario para que WMSvc entienda `msdeploy.axd`).
-3. **Crear un usuario de despliegue** con permisos de "IIS Manager Permissions" sobre el sitio/aplicación (no hace falta que sea admin del server completo).
-4. **Instalar y configurar el agente ngrok como servicio de Windows**:
+   Al terminar, prueba localmente sin abrir ningún puerto:
    ```powershell
-   ngrok config add-authtoken <TU_AUTHTOKEN>
-   ngrok tcp 8172 --remote-addr <tu-direccion-tcp-reservada>.tcp.ngrok.io:PORT
-   # o, como servicio permanente:
-   ngrok service install --config "C:\ProgramData\ngrok\ngrok.yml"
-   ngrok service start
+   Invoke-WebRequest http://localhost:8080 -UseBasicParsing
    ```
-   > Con cuenta gratuita, la dirección TCP cambia cada vez que se reinicia el túnel — el workflow ya resuelve la URL vigente automáticamente vía la API de ngrok, así que funciona igual, solo que si quieres una URL estable para depurar a mano conviene una **dirección TCP reservada** (plan pago de ngrok).
+   (en este punto va a devolver 403/404 porque la carpeta está vacía — es normal, el primer deploy la llena).
 
-## Secrets a crear en GitHub (Settings → Secrets and variables → Actions)
+2. **Push del código a tu repo** `bautismen/synapsis-deploy-net-test`, rama `main` (o dispara manualmente con "Run workflow" desde la pestaña Actions, ya que el workflow tiene `workflow_dispatch`).
 
-| Secret | Descripción |
-|---|---|
-| `NGROK_API_KEY` | API key de tu cuenta ngrok (para consultar el túnel activo vía API, no el authtoken del agente) |
-| `DEPLOY_USER` | Usuario de IIS Manager / Windows con permisos de deploy sobre el sitio |
-| `DEPLOY_PASSWORD` | Password de ese usuario |
+3. **Verificar el deploy**: en GitHub → Actions, deberías ver los dos jobs (`build` en un runner de GitHub, `deploy` en el tuyo). Al terminar, en el servidor:
+   ```powershell
+   Invoke-WebRequest http://localhost:8080 -UseBasicParsing
+   ```
+   ya debería devolver 200 con el HTML de "Hola Mundo".
 
-## Datos que necesito para dejar el workflow 100% ajustado a tu entorno
+4. **(Opcional) Ver el sitio desde tu navegador / internet**: eso ya no es parte del deploy, es exponer el *sitio web en sí*. Necesitas abrir el puerto `8080` en el Security Group de la instancia (TCP, restringido a tu IP si es solo para ti). Si prefieres no abrir nada, puedes usar `aws ssm start-session` con port forwarding para verlo sin tocar el Security Group.
 
-1. **Nombre exacto del sitio/aplicación en IIS** (ej. `Default Web Site` o `Default Web Site/HelloWorldApp`) → hoy está como placeholder en `IIS_APP_PATH` dentro de `deploy.yml`.
-2. **¿Tu cuenta de ngrok tiene dirección TCP reservada, o vamos a resolverla dinámicamente cada deploy vía API (como está armado ahora)?**
-3. **¿El usuario de deploy será una cuenta de IIS Manager (no-admin) o vas a usar una cuenta de Windows local/AD?** (cambia el `authtype` en msdeploy: `Basic` vs `NTLM`).
-4. **¿Ya tienes Web Deploy 3.6 y WMSvc instalados en el servidor, o lo armamos juntos con un script?**
-5. **Nombre del repo / rama** donde vivirá esto, por si hay que ajustar el trigger (`branches: [ "main" ]`).
+## Notas
 
-Con esas 5 respuestas dejo el `deploy.yml` y el `.pubxml` sin ningún TODO pendiente.
+- El App Pool queda en modo `v4.0` (CLR), correcto para .NET Framework 4.8.1.
+- `robocopy /MIR` espeja el contenido — borra en destino lo que no esté en el artifact, así el sitio siempre queda igual al build más reciente.
+- Si más adelante quieres reforzar seguridad, puedes registrar el runner con un label específico (`runs-on: [self-hosted, iis-prod]`) y limitar qué repos/workflows pueden apuntarle.
