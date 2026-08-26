@@ -75,7 +75,7 @@ jobs:
           path: site-package
 
       - name: Deploy a IIS (robocopy + recycle app pool)
-        shell: pwsh
+        shell: powershell
         run: |
           Import-Module WebAdministration
 
