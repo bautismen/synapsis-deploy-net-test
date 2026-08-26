@@ -101,3 +101,9 @@ jobs:
           Start-Sleep -Seconds 2
           $response = Invoke-WebRequest -Uri "http://localhost:8080" -UseBasicParsing
           Write-Host "Status code: $($response.StatusCode)"
+
+          # robocopy deja su propio exit code (1 = copió archivos, no es error)
+          # "pegado" en $LASTEXITCODE; lo reseteamos para que Actions no marque
+          # el step como fallido pese a que todo salió bien.
+          $global:LASTEXITCODE = 0
+          exit 0
