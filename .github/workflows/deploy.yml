@@ -84,7 +84,11 @@ jobs:
           $source   = "site-package"
 
           Write-Host "Deteniendo App Pool '$siteName'..."
-          Stop-WebAppPool -Name $siteName -ErrorAction SilentlyContinue
+          try {
+            Stop-WebAppPool -Name $siteName -ErrorAction Stop
+          } catch {
+            Write-Host "  (ya estaba detenido o no se pudo detener, se ignora: $($_.Exception.Message))"
+          }
           Start-Sleep -Seconds 2
 
           Write-Host "Copiando archivos con robocopy (/MIR)..."
@@ -95,7 +99,21 @@ jobs:
           }
 
           Write-Host "Arrancando App Pool '$siteName'..."
-          Start-WebAppPool -Name $siteName
+          $maxRetries = 5
+          $started = $false
+          for ($i = 1; $i -le $maxRetries; $i++) {
+            try {
+              Start-WebAppPool -Name $siteName -ErrorAction Stop
+              $started = $true
+              break
+            } catch {
+              Write-Host "  Intento $i/$maxRetries fallo ($($_.Exception.Message)), reintentando en 3s..."
+              Start-Sleep -Seconds 3
+            }
+          }
+          if (-not $started) {
+            throw "No se pudo arrancar el App Pool '$siteName' tras $maxRetries intentos."
+          }
 
           Write-Host "Verificando respuesta local..."
           Start-Sleep -Seconds 2
